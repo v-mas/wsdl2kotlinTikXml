@@ -258,11 +258,16 @@ sub create_props_kt
 		push(@imports, @ktype[1]);
 		push(@imports, "import com.tickaroo.tikxml.annotation.".(@ktype[0]?"Property":"")."Element");
 		
+		my $name = @prop{'name'};
+		if (@ktype[2] ne 'Boolean' && $name =~ /^is/) {
+			$name = lcfirst(($name =~ /^is(.*)$/)[0]);
+		}
+		
 		my @annotationProps = ();
 		my $annotation = @ktype[0] ? "\@PropertyElement" : "\@Element";
-		if(defined @prop{'alias'} && @prop{'alias'} ne @prop{'name'}) { push @annotationProps, "name = \"@prop{'alias'}\""; }
+		if(defined @prop{'alias'} && @prop{'alias'} ne $name) { push @annotationProps, "name = \"@prop{'alias'}\""; }
 		if(@ktype[3] ne "") { push @annotationProps, "converter = @ktype[3]"; }
-		my $prop_code = $annotation.(@annotationProps?'('.join(', ', @annotationProps).')':'').($as_field?" val":"")." @prop{'name'}: @ktype[2]";
+		my $prop_code = $annotation.(@annotationProps?'('.join(', ', @annotationProps).')':'').($as_field?" val":"")." $name: @ktype[2]";
 		push(@props, $prop_code);
 	}
 	return ( \@imports, \@props);
