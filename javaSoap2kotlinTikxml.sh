@@ -3,7 +3,7 @@ use v5.14;
 use strict;
 use Data::Dumper;
 use File::Basename;
-use File::Path;
+use File::Path qw/make_path/;
 use File::Find;
 use File::Spec;
 no warnings 'experimental';
@@ -55,11 +55,12 @@ sub main
 	
 	#add parent object reference to child to be able to get parent info
 	foreach(@files) {
-		if(@$_{'type'} eq 'class' && defined @_{'parentclass'}) {
+		if(@$_{'type'} eq 'class' && defined @$_{'parentclass'}) {
 			my $child_ref = $_;
 			foreach(@files) {
 				if(@$_{'name'} eq @$child_ref{'parentclass'}) {
 					@$child_ref{'parent'} = $_;
+					@$_{'is_parent'} = 1;
 					last;
 				}
 			}
@@ -85,7 +86,8 @@ sub main
 				next;
 			}
 		}
-		open(my $fh_out, '>', $tofile);
+		make_path(dirname($tofile));
+		open(my $fh_out, '>', $tofile) or die("unable to create file to write");
 		print $fh_out $ktcode;
 		close($fh_out);
 	}
@@ -139,7 +141,6 @@ sub main
 			open(my $fh_out, '>', $file);
 			print $fh_out $ktcode;
 			close($fh_out);
-			
 		}
 	}
 };
@@ -205,37 +206,66 @@ sub get_class_code_kt
 {
 	my %info = %{$_[0]};
 	my @enums = @{$_[1]};
-	
 	my @imports = (
 		"import com.tickaroo.tikxml.annotation.Xml"
 	);
 	my @props = ();
-	foreach(@{@info{'props'}}) {
+	my ($i, $p) = create_props_kt(@info{'props'}, $_[1], 1);
+	push @imports, @$i;
+	push @props, @$p;
+	if (@info{'parent'}) { 
+		my ($i, $p) = create_props_kt(@info{'parent'}->{'props'}, $_[1], 0);
+		push @imports, @$i;
+		push @props, @$p;
+	}
+	
+	my @parent_params = ();
+	if (@info{'parent'}) {
+		foreach(@{@info{'parent'}->{'props'}}) {
+			push @parent_params, @$_{'name'};
+		}
+	}
+	
+	my @mainAnnotationParams = ();
+	if (@info{'name'} ne @info{'alias'}) { push @mainAnnotationParams, "name = \"@info{'alias'}\""; }
+
+	my $tabulation = 7+length(@info{'name'});
+	if (@info{'is_parent'}) { $tabulation += 5; }
+	my $ktcode = 
+		"package @info{'package'}\n".
+		"\n".
+		join("\n", uniq(@imports))."\n".
+		"\n".
+		"\@Xml".(@mainAnnotationParams ? "(".join(', ', @mainAnnotationParams).")": '')."\n".
+		(@info{'is_parent'}?"open ":"")."class @info{'name'}(".join(",\n".(" " x $tabulation), @props).")".(@info{'parentclass'} ? " : @info{'parentclass'}(".join(', ', @parent_params).")":"")."\n"; 
+	return $ktcode;
+	
+};
+#param in @props - list of properies details
+#param in @enums - list of enum names
+#param in $fields - make them as fields, or as parameters
+sub create_props_kt
+{
+	my @enums = @{$_[1]};
+	my $as_field = $_[2];
+	my @imports = ();
+	my @props = ();
+	foreach(@{$_[0]}) {
 		my %prop = %$_;
 		my $optional = !@prop{'required'} || @prop{'nillable'};
 
 		my @ktype = define_kt_type(@prop{'type'}, @prop{'required'} && !@prop{'nillable'}, \@enums);
 		push(@imports, @ktype[1]);
 		push(@imports, "import com.tickaroo.tikxml.annotation.".(@ktype[0]?"Property":"")."Element");
-
+		
 		my @annotationProps = ();
 		my $annotation = @ktype[0] ? "\@PropertyElement" : "\@Element";
 		if(defined @prop{'alias'} && @prop{'alias'} ne @prop{'name'}) { push @annotationProps, "name = \"@prop{'alias'}\""; }
 		if(@ktype[3] ne "") { push @annotationProps, "converter = @ktype[3]"; }
-		my $prop_code = $annotation.(@annotationProps?'('.join(', ', @annotationProps).')':'')." val @prop{'name'}: @ktype[2]";
+		my $prop_code = $annotation.(@annotationProps?'('.join(', ', @annotationProps).')':'').($as_field?" val":"")." @prop{'name'}: @ktype[2]";
 		push(@props, $prop_code);
 	}
-	
-	my $ktcode = 
-	"package @info{'package'}\n".
-	"\n".
-	join("\n", uniq(@imports))."\n".
-	"\n".
-	"\@Xml".(@info{'name'} eq @info{'alias'} ? "" : "(name = \"@info{'alias'}\")")."\n".
-	"class @info{'name'}(".join(",\n".(" " x (7+length(@info{'name'}))), @props).")\n"; 
-	
-	#.(defined $parentclass ? " : $parentclass" : "");
-	return $ktcode;
+	return ( \@imports, \@props);
 };
 
 # convert Java-types to Kotlin-Types allowing also for custom import
