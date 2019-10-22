@@ -103,6 +103,12 @@ sub main
 				push @converters, \@conv;
 			}
 			default {
+				my $warn = 1;
+				my $name = $_;
+				foreach(@files) {
+					if (@$_{'name'} eq $name) { $warn = 0; last; }
+				}
+				next if(!$warn);
 				print "WARNING: UNKNOWN TYPE TO CONVERT: $_ \n";
 			}
 		}
@@ -214,8 +220,8 @@ sub get_class_code_kt
 
 		my @annotationProps = ();
 		my $annotation = @ktype[0] ? "\@PropertyElement" : "\@Element";
-		if(defined @prop{'alias'} && @prop{'alias'} ne @prop{'name'}) { push @annotationProps, "name=\"@prop{'alias'}\""; }
-		if(@ktype[3] ne "") { push @annotationProps, "converter=@ktype[3]"; }
+		if(defined @prop{'alias'} && @prop{'alias'} ne @prop{'name'}) { push @annotationProps, "name = \"@prop{'alias'}\""; }
+		if(@ktype[3] ne "") { push @annotationProps, "converter = @ktype[3]"; }
 		my $prop_code = $annotation.(@annotationProps?'('.join(', ', @annotationProps).')':'')." val @prop{'name'}: @ktype[2]";
 		push(@props, $prop_code);
 	}
@@ -225,7 +231,7 @@ sub get_class_code_kt
 	"\n".
 	join("\n", uniq(@imports))."\n".
 	"\n".
-	"\@Xml".(@info{'name'} eq @info{'alias'} ? "" : "(name=\"@info{'alias'}\")")."\n".
+	"\@Xml".(@info{'name'} eq @info{'alias'} ? "" : "(name = \"@info{'alias'}\")")."\n".
 	"class @info{'name'}(".join(",\n".(" " x (7+length(@info{'name'}))), @props).")\n"; 
 	
 	#.(defined $parentclass ? " : $parentclass" : "");
@@ -240,7 +246,9 @@ sub get_class_code_kt
 sub define_kt_type
 {
 	my @enums = @{$_[2]};
-	my $original = $_[0].($_[1] ? "" : "?");
+	my $rawtype = $_[0];
+	my $appendix = ($_[1] ? "" : "?");
+	my $original = $_[0].$appendix;
 	given($_[0]) {
 		when('boolean') { return (1, "", "Boolean", ""); }
 		when('Boolean') { return (1, "", "Boolean?", ""); }
@@ -252,11 +260,11 @@ sub define_kt_type
 		when('Integer') { return (1, "", "Int?", ""); }
 		when('long') { return (1, "", "Long", ""); }
 		when('String') { return (1, "", $original, ""); }
-		when('XMLGregorianCalendar') { return (1, "import java.util.Date", "Date".($_[1] ? "" : "?"), ""); }
+		when('XMLGregorianCalendar') { return (1, "import java.util.Date", "Date$appendix", ""); }
 		when(/List<\w+>/) { return (0, "import java.util.List", $original, ""); }
 		default {
-			#is it enum?
-			if (defined grep(/^$_$/, @enums)) {
+			if (grep(/^$rawtype$/, @enums) or 0) {
+				#use given enum converter
 				return (1, "", $original, "$_.Converter::class");
 			}
 			push @additionalConverters, $_;
