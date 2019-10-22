@@ -296,7 +296,7 @@ sub define_kt_type
 		when('long') { return (1, "", "Long", ""); }
 		when('String') { return (1, "", $original, ""); }
 		when('XMLGregorianCalendar') { return (1, "import java.util.Date", "Date$appendix", ""); }
-		when(/List<\w+>/) { return (0, "import java.util.List", $original, ""); }
+		when(/List<\w+>/) { return (0, "", "List<\@JvmSuppressWildcards ".(($_ =~ /<(\w+)>/)[0]).">".$appendix, ""); }
 		default {
 			if (grep(/^$rawtype$/, @enums) or 0) {
 				#use given enum converter
