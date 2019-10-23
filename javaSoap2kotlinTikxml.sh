@@ -45,6 +45,9 @@ sub main
 	mkdir $to;
 	chdir $to;
 	
+	my $package = @{@files[0]}{'package'};
+	my $dir = dirname(@{@files[0]}{'file'});
+	
 	#list of enums as they require special converters
 	my @enums = ();
 	foreach(@files) {
@@ -100,8 +103,8 @@ sub main
 				my @conv = (
 				$_,
 				"import java.math.BigDecimal",
-				"\t\treturn value.toPlainString()",
-				"\t\treturn if(value.isEmpty()) null else BigDecimal(value)");
+				"        return value.toPlainString()",
+				"        return if(value.isEmpty()) null else BigDecimal(value)");
 				push @converters, \@conv;
 			}
 			default {
@@ -116,32 +119,57 @@ sub main
 		}
 	}
 	
-	if(scalar @converters > 0) {	
-		my $package = @{@files[0]}{'package'};
-		my $dir = dirname(@{@files[0]}{'file'});
-		
+	if(@converters) {	
 		foreach(@converters) {
 			my $file = File::Spec->catfile($dir, @$_[0]."Converter.kt");
-		
 			my $ktcode = "package $package\n".
 				"\n".
 				"import com.tickaroo.tikxml.TypeConverter\n".
 				@$_[1]."\n".
 				"\n".
 				"class @$_[0]Converter: TypeConverter<@$_[0]> {\n".
-				"	override fun write(value: @$_[0]): String {\n".
+				"    override fun write(value: @$_[0]): String {\n".
 				@$_[2]."\n".
-				"	}\n".
-				"	\n".
-				"	override fun read(value: String): @$_[0]? {\n".
+				"    }\n".
+				"    \n".
+				"    override fun read(value: String): @$_[0]? {\n".
 				@$_[3]."\n".
-				"	}\n".
+				"    }\n".
 				"}\n";
 			
 			open(my $fh_out, '>', $file);
 			print $fh_out $ktcode;
 			close($fh_out);
 		}
+	}
+	
+	# add extension for TikXml.Builder to add TypeAdapters of enums
+	if(@enums) {
+		my $file = File::Spec->catfile($dir, "extensions.kt");
+		
+		my @imports = (
+			"import com.tickaroo.tikxml.TikXml"
+		);
+		my @singleExtensions = ();
+		my @chainedCalls = ();
+		foreach(@enums) {
+			push @singleExtensions, 
+				"inline fun TikXml.Builder.add".$_."Adapter() =\n".
+				"    addTypeAdapter(".$_."::class.java, $_.Adapter())";
+			push @chainedCalls, "add".$_."Adapter()";
+		}
+		
+		my $ktcode = "package $package\n".
+			"\n".
+			join("\n", uniq(@imports))."\n".
+			"\n".
+			join("\n\n", @singleExtensions)."\n\n".
+			"fun TikXml.Builder.addEnumAdapters() =\n".
+			"    ".join("\n    .", @chainedCalls)."\n";
+		
+		open(my $fh_out, '>', $file);
+		print $fh_out $ktcode;
+		close($fh_out);
 	}
 };
 
@@ -239,7 +267,6 @@ sub get_class_code_kt
 		"\@Xml".(@mainAnnotationParams ? "(".join(', ', @mainAnnotationParams).")": '')."\n".
 		(@info{'is_parent'}?"open ":"")."class @info{'name'}(".join(",\n".(" " x $tabulation), @props).")".(@info{'parentclass'} ? " : @info{'parentclass'}(".join(', ', @parent_params).")":"")."\n"; 
 	return $ktcode;
-	
 };
 #param in @props - list of properies details
 #param in @enums - list of enum names
@@ -331,8 +358,12 @@ sub get_enum_code_kt
 {
 	my %info = %{$_[0]};
 	my @imports = (
-		"import com.tickaroo.tikxml.TypeConverter"
-		);
+		"import com.tickaroo.tikxml.TikXmlConfig",
+		"import com.tickaroo.tikxml.TypeConverter",
+		"import com.tickaroo.tikxml.XmlReader",
+		"import com.tickaroo.tikxml.XmlWriter",
+		"import com.tickaroo.tikxml.typeadapter.TypeAdapter"
+	);
 	my @props = ();
 	my @write_conditions = ();
 	my @read_conditions = ();
@@ -350,21 +381,43 @@ sub get_enum_code_kt
 		join("\n", uniq(@imports))."\n".
 		"\n".
 		"enum class @info{'name'} {\n".
-		"\t".join(",\n\t", @props).";\n".
+		"    ".join(",\n    ", @props).";\n".
 		"\n".
-		"	class Converter: TypeConverter<@info{'name'}> {\n".
-		"		override fun write(value: @info{'name'}): String {\n".
-		"			return when (value) {\n".
-		"				".join("\n\t\t\t\t", @write_conditions)."\n".
-		"			}\n".
-		"		}\n".
+		"    class Converter: TypeConverter<@info{'name'}> {\n".
+		"        override fun write(value: @info{'name'}): String {\n".
+		"            return when (value) {\n".
+		"                ".join("\n                ", @write_conditions)."\n".
+		"            }\n".
+		"        }\n".
 		"\n".
-		"		override fun read(value: String): @info{'name'}? {\n".
-		"			return when (value) {\n".
-		"				".join("\n\t\t\t\t", @read_conditions)."\n".
-		"			}\n".
-		"		}\n".
-		"	}\n".
+		"        override fun read(value: String): @info{'name'}? {\n".
+		"            return when (value) {\n".
+		"                ".join("\n                ", @read_conditions)."\n".
+		"            }\n".
+		"        }\n".
+		"    }\n".
+		"\n".
+		"    class Adapter : TypeAdapter<@info{'name'}> {\n".
+		"        private val converter = Converter()\n".
+		"\n".
+		"        override fun toXml(\n".
+		"            writer: XmlWriter,\n".
+		"            config: TikXmlConfig,\n".
+		"            value: @info{'name'},\n".
+		"            overridingXmlElementTagName: String?\n".
+		"        ) {\n".
+		"            writer.beginElement(overridingXmlElementTagName ?: \"@info{'name'}\")\n".
+		"            writer.textContent(converter.write(value))\n".
+		"            writer.endElement()\n".
+		"        }\n".
+		"\n".
+		"        override fun fromXml(reader: XmlReader, config: TikXmlConfig): @info{'name'}? {\n".
+		"            reader.beginElement()\n".
+		"            val item = reader.nextTextContent()?.let { converter.read(it) }\n".
+		"            reader.endElement()\n".
+		"            return item\n".
+		"        }\n".
+		"    }\n".
 		"}\n";
 	return $ktcode;
 };
