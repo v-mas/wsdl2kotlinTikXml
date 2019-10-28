@@ -19,11 +19,12 @@ my $dir = basename($path);
 my $ktdir = File::Spec->catdir($root, $dir."_kt");
 
 main(File::Spec->catdir($root, $dir), $ktdir);
-print "\nclasses generated into $ktdir. Remember to add generated TypeAdapters for enums when creating TikXml instance with `addEnumAdapters\()` extension\n";
+print "\nclasses generated into $ktdir.\nRemember to add generated TypeAdapters with your instance of TikXml.\n\n\tTikXml.Builder().addModelAdapters().build()\n\n";
 }
 exit 0; #just an indicator that there is no global code after this point
 
 my @additionalConverters = ();
+my @additionalAdapters = ();
 
 # param in $dir - directory where are generated java classes. directory structure will be copied.
 sub main
@@ -96,18 +97,25 @@ sub main
 		close($fh_out);
 	}
 	
-	# additional converters for known classes that are of simple type
-	my @converters = ();
-	foreach(@additionalConverters) {
+	# additional converters 
+	# - for known classes that are of "simple" type (write to single string, like BigDecimal)
+	foreach(uniq(@additionalConverters)) {
+		my $import = "";
+		my $write = "";
+		my $read = "";
 		given($_) {
 			when('BigDecimal') {
-				my @conv = (
-				$_,
-				"import java.math.BigDecimal",
-				"        return value.toPlainString()",
-				"        return if(value.isEmpty()) null else BigDecimal(value)");
-				push @converters, \@conv;
+				$import = "import java.math.BigDecimal";
+				$write = "        return value.toPlainString()";
+				$read = "        return if(value.isEmpty()) null else BigDecimal(value)";
 			}
+			when('Date') {
+				print "     ****\n     INFO: Make sure to include your Date converter of choice to TikXml config. If you don't know what to choose, check out com.tickaroo.tikxml:converter-date-rfc3339 official converter.\n     ****\n\n";
+				next;
+			}
+			when('String') { next; } #skip
+			when('Int') { next; } #skip
+			when('Boolean') { next; } #skip
 			default {
 				my $warn = 1;
 				my $name = $_;
@@ -116,58 +124,194 @@ sub main
 				}
 				next if(!$warn);
 				print "WARNING: UNKNOWN TYPE TO CONVERT: $_ \n";
+				next;
 			}
 		}
+		my $file = File::Spec->catfile($dir, $_."Converter.kt");
+		my $ktcode = "package $package\n".
+			"\n".
+			"import com.tickaroo.tikxml.TypeConverter\n".
+			"$import\n".
+			"\n".
+			"class ".$_."Converter: TypeConverter<$_> {\n".
+			"    override fun write(value: $_): String {\n".
+			"$write\n".
+			"    }\n".
+			"    \n".
+			"    override fun read(value: String): $_? {\n".
+			"$read\n".
+			"    }\n".
+			"}\n";
+
+		open(my $fh_out, '>', $file);
+		print $fh_out $ktcode;
+		close($fh_out);
 	}
 	
-	if(@converters) {	
-		foreach(@converters) {
-			my $file = File::Spec->catfile($dir, @$_[0]."Converter.kt");
-			my $ktcode = "package $package\n".
-				"\n".
-				"import com.tickaroo.tikxml.TypeConverter\n".
-				@$_[1]."\n".
-				"\n".
-				"class @$_[0]Converter: TypeConverter<@$_[0]> {\n".
-				"    override fun write(value: @$_[0]): String {\n".
-				@$_[2]."\n".
+	# add generic class for using converter from TikXmlConfig inside TypeAdapter
+	if (@additionalAdapters || @enums) {
+		my $file = File::Spec->catfile($dir, "ConverterTypeAdapter.kt");
+		my @imports = ();
+		
+		my $ktcode = "package $package\n".
+			"\n".
+			"import com.tickaroo.tikxml.*\n".
+			"import com.tickaroo.tikxml.typeadapter.TypeAdapter\n".
+			"\n".
+			"class ConverterTypeAdapter<T>(\n".
+			"    private val clazz: Class<T>,\n".
+			"    private val converter: TypeConverter<T>?\n".
+			") : TypeAdapter<T> {\n".
+			"    override fun fromXml(reader: XmlReader, config: TikXmlConfig): T {\n".
+			"        while (reader.hasAttribute()) reader.skipAttribute()\n".
+			"        while (reader.hasElement()) reader.skipRemainingElement()\n".
+			"        check(reader.hasTextContent()) { \"text content not found for parsing \${clazz.simpleName}\" }\n".
+			"        return (converter ?: config.getTypeConverter(clazz)).read(reader.nextTextContent())\n".
+			"    }\n".
+			"\n".
+			"    override fun toXml(\n".
+			"        writer: XmlWriter,\n".
+			"        config: TikXmlConfig,\n".
+			"        value: T,\n".
+			"        overridingXmlElementTagName: String?\n".
+			"    ) {\n".
+			"        writer.beginElement(overridingXmlElementTagName ?: clazz.simpleName)\n".
+			"        writer.textContent((converter ?: config.getTypeConverter(clazz)).write(value))\n".
+			"        writer.endElement()\n".
+			"    }\n".
+			"}\n";
+
+		open(my $fh_out, '>', $file);
+		print $fh_out $ktcode;
+		close($fh_out);
+	}
+	
+	# additional adapters
+	# - for primitives used in lists
+	# - for enums (only ones used in lists)
+	if (@additionalAdapters) {
+		#saved to single file for simplicity of this script
+		my $file = File::Spec->catfile($dir, "TikXmlAdapters.kt");
+		
+		my @imports = ();
+		push @imports, "import com.tickaroo.tikxml.TikXml";
+		my @classes = ();
+		my @chainedCalls = ();
+		my $writeSimple = 0;
+		
+		#param in $type - Kotlin type
+		#param in $class - whole package or just name
+		#param in $read - way of reading value from XmlReader
+		#param in $write - way of saving value to XmlWriter
+		sub get_simple_adapter_chain_call
+		{
+			my ($type, $clazz, $read, $write) = @_;
+			return "addTypeAdapter(\n".
+					"        ".$clazz."::class.java,\n".
+					"        simpleValueAdapter<$type>(\n".
+					"            { $read },\n".
+					"            { it, value -> $write })\n".
+					"    )";
+		}
+		
+		foreach(uniq(@additionalAdapters)) {
+			given($_) {
+				when('Boolean') {
+					$writeSimple = 1;
+					push @chainedCalls, get_simple_adapter_chain_call(
+						'Boolean',
+						'java.lang.Boolean',
+						'it.textContent(value)', 
+						'it.nextTextContentAsBoolean()');
+					next;
+				}
+				when('BigDecimal') {
+					push @chainedCalls, "addTypeAdapter(\n".
+						"        java.math.BigDecimal::class.java,\n".
+						"        ConverterTypeAdapter(java.math.BigDecimal::class.java, BigDecimalConverter())\n".
+						"    )";
+					next;
+				}
+				when('Int') {
+					$writeSimple = 1;
+					push @chainedCalls, get_simple_adapter_chain_call(
+						'Int',
+						'java.lang.Integer',
+						'it.textContent(value)',
+						'it.nextTextContentAsInt()');
+					next;
+				}
+				when('String') {
+					$writeSimple = 1;
+					push @chainedCalls, get_simple_adapter_chain_call(
+						'String',
+						'java.lang.String',
+						'it, value -> it.textContent(value)',
+						'it.nextTextContent()');
+					next;
+				}
+				when('Date') {
+					push @chainedCalls, "addTypeAdapter(\n".
+						"        java.util.Date::class.java,\n".
+						"        ConverterTypeAdapter(java.util.Date::class.java, null /* use otherwise provided converter */)\n".
+						"    )";
+					next;
+				}
+				default {
+					my $s = $_;
+					if (!grep(/^$s$/, @enums)) {
+						print "WARNING: UNKNOWN TYPE FOR ADAPTER: $_ \n";
+						next;
+					}
+					#handle enum
+					push @chainedCalls, "addTypeAdapter(\n".
+						"        ".$_."::class.java,\n".
+						"        ConverterTypeAdapter(".$_."::class.java, ".$_.".Converter())\n".
+						"    )";
+				}
+			}
+	
+		}
+		
+		if ($writeSimple) {
+			push @imports, "import com.tickaroo.tikxml.TikXml";
+			push @imports, "import com.tickaroo.tikxml.TikXmlConfig";
+			push @imports, "import com.tickaroo.tikxml.XmlReader";
+			push @imports, "import com.tickaroo.tikxml.XmlWriter";
+			push @imports, "import com.tickaroo.tikxml.typeadapter.TypeAdapter";
+			push @classes, "private inline fun <reified T> simpleValueAdapter(\n".
+				"    crossinline read: (XmlReader) -> T,\n".
+				"    crossinline write: (XmlWriter, T) -> Unit\n".
+				") = object : TypeAdapter<T> {\n".
+				"    override fun fromXml(reader: XmlReader, config: TikXmlConfig): T {\n".
+				"        while (reader.hasAttribute()) reader.skipAttribute()\n".
+				"        while (reader.hasElement()) reader.skipRemainingElement()\n".
+				"        check(reader.hasTextContent()) { \"text content not found for parsing \${T::class.java}\" }\n".
+				"        val ret = read(reader)\n".
+				"        return ret\n".
 				"    }\n".
-				"    \n".
-				"    override fun read(value: String): @$_[0]? {\n".
-				@$_[3]."\n".
+				"\n".
+				"    override fun toXml(\n".
+				"        writer: XmlWriter,\n".
+				"        config: TikXmlConfig,\n".
+				"        value: T,\n".
+				"        overridingXmlElementTagName: String?\n".
+				"    ) {\n".
+				"        writer.beginElement(overridingXmlElementTagName ?: \"item\")\n".
+				"        write(writer, value)\n".
+				"        writer.endElement()\n".
 				"    }\n".
 				"}\n";
-			
-			open(my $fh_out, '>', $file);
-			print $fh_out $ktcode;
-			close($fh_out);
-		}
-	}
-	
-	# add extension for TikXml.Builder to add TypeAdapters of enums
-	if(@enums) {
-		my $file = File::Spec->catfile($dir, "extensions.kt");
-		
-		my @imports = (
-			"import com.tickaroo.tikxml.TikXml"
-		);
-		my @singleExtensions = ();
-		my @chainedCalls = ();
-		foreach(@enums) {
-			push @singleExtensions, 
-				"inline fun TikXml.Builder.add".$_."Adapter() =\n".
-				"    addTypeAdapter(".$_."::class.java, $_.Adapter())";
-			push @chainedCalls, "add".$_."Adapter()";
 		}
 		
 		my $ktcode = "package $package\n".
 			"\n".
-			join("\n", uniq(@imports))."\n".
+			(@imports ? join("\n", uniq(@imports))."\n" : "").
 			"\n".
-			join("\n\n", @singleExtensions)."\n\n".
-			"fun TikXml.Builder.addEnumAdapters() =\n".
-			"    ".join("\n    .", @chainedCalls)."\n";
-		
+			(@classes ? join("\n", @classes)."\n\n" : "").
+			"fun TikXml.Builder.addModelAdapters() =\n".
+			"    ".join(".", @chainedCalls)."\n";
+
 		open(my $fh_out, '>', $file);
 		print $fh_out $ktcode;
 		close($fh_out);
@@ -314,7 +458,7 @@ sub define_kt_type
 	my $original = $_[0].$appendix;
 	given($_[0]) {
 		when('boolean') { return (1, "", "Boolean", ""); }
-		when('Boolean') { return (1, "", "Boolean?", ""); }
+		when('Boolean') { return (1, "", "Boolean$appendix", ""); }
 		when('BigDecimal') {
 			push @additionalConverters, $_;
 			return (1, "import java.math.BigDecimal", $original, "BigDecimalConverter::class"); 
@@ -322,9 +466,49 @@ sub define_kt_type
 		when('int') { return (1, "", "Int", ""); }
 		when('Integer') { return (1, "", "Int?", ""); }
 		when('long') { return (1, "", "Long", ""); }
-		when('String') { return (1, "", $original, ""); }
-		when('XMLGregorianCalendar') { return (1, "import java.util.Date", "Date$appendix", ""); }
-		when(/List<\w+>/) { return (0, "", "List<\@JvmSuppressWildcards ".(($_ =~ /<(\w+)>/)[0]).">".$appendix, ""); }
+		when('String') { return (1, "", "String$appendix", ""); }
+		when('XMLGregorianCalendar') { 
+			push @additionalConverters, "Date";
+			return (1, "import java.util.Date", "Date$appendix", "");
+		}
+		when(/List<\w+>/) { 
+			my $subtype = ($_ =~ /<(\w+)>/)[0];
+			my $subtypekt = "";
+			my $import = "";
+			given($subtype) { #for known boxed primitives we need to create TypeAdapter that will read value
+				when('Boolean') {
+					$subtypekt = "Boolean";
+					push @additionalAdapters, $subtypekt;
+				}
+				when('BigDecimal') {
+					$subtypekt = $_;
+					$import = "import java.math.BigDecimal";
+					push @additionalConverters, $subtypekt;
+					push @additionalAdapters, $subtypekt;
+				}
+				when('Integer') {
+					$subtypekt = "Int";
+					push @additionalAdapters, $subtypekt;
+				}
+				when('String') {
+					$subtypekt = "String";
+					push @additionalAdapters, $subtypekt;
+				}
+				when('XMLGregorianCalendar') {
+					$subtypekt = "Date";
+					$import = "import java.util.Date";
+					push @additionalConverters, $subtypekt;
+					push @additionalAdapters, $subtypekt;
+				}
+				default {
+					$subtypekt = $subtype;
+					if (grep(/^$subtypekt$/, @enums) or 0) {
+						push @additionalAdapters, $subtypekt;
+					}
+				}
+			}
+			return (0, $import, "List<\@JvmSuppressWildcards $subtypekt>".$appendix, ""); 
+		}
 		default {
 			if (grep(/^$rawtype$/, @enums) or 0) {
 				#use given enum converter
@@ -395,28 +579,6 @@ sub get_enum_code_kt
 		"            return when (value) {\n".
 		"                ".join("\n                ", @read_conditions)."\n".
 		"            }\n".
-		"        }\n".
-		"    }\n".
-		"\n".
-		"    class Adapter : TypeAdapter<@info{'name'}> {\n".
-		"        private val converter = Converter()\n".
-		"\n".
-		"        override fun toXml(\n".
-		"            writer: XmlWriter,\n".
-		"            config: TikXmlConfig,\n".
-		"            value: @info{'name'},\n".
-		"            overridingXmlElementTagName: String?\n".
-		"        ) {\n".
-		"            writer.beginElement(overridingXmlElementTagName ?: \"@info{'name'}\")\n".
-		"            writer.textContent(converter.write(value))\n".
-		"            writer.endElement()\n".
-		"        }\n".
-		"\n".
-		"        override fun fromXml(reader: XmlReader, config: TikXmlConfig): @info{'name'}? {\n".
-		"            while (reader.hasAttribute()) reader.skipAttribute()\n".
-		"            while (reader.hasElement()) reader.skipRemainingElement()\n".
-		"            val item = reader.nextTextContent()?.let { converter.read(it) }\n".
-		"            return item\n".
 		"        }\n".
 		"    }\n".
 		"}\n";
