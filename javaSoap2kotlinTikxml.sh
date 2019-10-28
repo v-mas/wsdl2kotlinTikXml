@@ -19,6 +19,7 @@ my $dir = basename($path);
 my $ktdir = File::Spec->catdir($root, $dir."_kt");
 
 main(File::Spec->catdir($root, $dir), $ktdir);
+print "\nclasses generated into $ktdir. Remember to add generated TypeAdapters for enums when creating TikXml instance with `addEnumAdapters\()` extension\n";
 }
 exit 0; #just an indicator that there is no global code after this point
 
