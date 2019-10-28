@@ -412,9 +412,9 @@ sub get_enum_code_kt
 		"        }\n".
 		"\n".
 		"        override fun fromXml(reader: XmlReader, config: TikXmlConfig): @info{'name'}? {\n".
-		"            reader.beginElement()\n".
+		"            while (reader.hasAttribute()) reader.skipAttribute()\n".
+		"            while (reader.hasElement()) reader.skipRemainingElement()\n".
 		"            val item = reader.nextTextContent()?.let { converter.read(it) }\n".
-		"            reader.endElement()\n".
 		"            return item\n".
 		"        }\n".
 		"    }\n".
